@@ -12,7 +12,6 @@ use crate::api::UsageResponse;
 use crate::config;
 use crate::cookies::{self, BrowserKind};
 use crate::usage_state::UsageModel;
-use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 
 const POPUP_WIDTH: i32 = 186;
 const POPUP_HEIGHT: i32 = 274;
@@ -77,15 +76,6 @@ impl TrayMetrics {
     }
 }
 
-fn blend_pixel(dest: &mut [u8], src: [u8; 4], coverage: f32) {
-    let alpha = (src[3] as f32 / 255.0) * coverage.clamp(0.0, 1.0);
-    let inv = 1.0 - alpha;
-    dest[0] = (src[0] as f32 * alpha + dest[0] as f32 * inv).round() as u8;
-    dest[1] = (src[1] as f32 * alpha + dest[1] as f32 * inv).round() as u8;
-    dest[2] = (src[2] as f32 * alpha + dest[2] as f32 * inv).round() as u8;
-    dest[3] = ((alpha + (dest[3] as f32 / 255.0) * inv) * 255.0).round() as u8;
-}
-
 fn fill_rect(buf: &mut [u8], width: usize, x: usize, y: usize, w: usize, h: usize, color: [u8; 4]) {
     for yy in y..(y + h) {
         for xx in x..(x + w) {
@@ -95,41 +85,49 @@ fn fill_rect(buf: &mut [u8], width: usize, x: usize, y: usize, w: usize, h: usiz
     }
 }
 
-fn draw_text(
+fn parse_percent(text: &str) -> Option<f64> {
+    text.strip_suffix('%')?.parse::<f64>().ok()
+}
+
+fn palette_color(percent: Option<f64>) -> [u8; 4] {
+    match percent {
+        None => [150, 150, 150, 255],
+        Some(p) if p < 20.0 => [74, 144, 217, 255],
+        Some(p) if p < 40.0 => [58, 166, 85, 255],
+        Some(p) if p < 60.0 => [212, 190, 57, 255],
+        Some(p) if p < 80.0 => [224, 138, 47, 255],
+        Some(_) => [220, 69, 69, 255],
+    }
+}
+
+fn draw_bar(
     buf: &mut [u8],
     width: usize,
-    height: usize,
-    font: &FontRef<'_>,
-    text: &str,
-    x: f32,
-    y: f32,
-    px: f32,
-    color: [u8; 4],
+    x: usize,
+    y: usize,
+    bar_w: usize,
+    bar_h: usize,
+    percent: Option<f64>,
 ) {
-    let scaled = font.as_scaled(PxScale::from(px));
-    let mut caret = point(x, y + scaled.ascent());
-    let mut previous = None;
+    let frame = [110, 110, 110, 255];
+    let bg = [255, 255, 255, 0];
+    fill_rect(buf, width, x, y, bar_w, bar_h, frame);
+    fill_rect(buf, width, x + 1, y + 1, bar_w - 2, bar_h - 2, bg);
 
-    for ch in text.chars() {
-        let glyph_id = scaled.glyph_id(ch);
-        if let Some(prev) = previous {
-            caret.x += scaled.kern(prev, glyph_id);
-        }
-        let glyph = glyph_id.with_scale_and_position(scaled.scale(), caret);
-        if let Some(outlined) = scaled.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            outlined.draw(|gx, gy, coverage| {
-                let px = gx as i32 + bounds.min.x.floor() as i32;
-                let py = gy as i32 + bounds.min.y.floor() as i32;
-                if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                    return;
-                }
-                let idx = (py as usize * width + px as usize) * 4;
-                blend_pixel(&mut buf[idx..idx + 4], color, coverage);
-            });
-        }
-        caret.x += scaled.h_advance(glyph_id);
-        previous = Some(glyph_id);
+    let fill_pct = percent.unwrap_or(0.0).clamp(0.0, 100.0);
+    let inner_h = bar_h - 2;
+    let filled_h = ((inner_h as f64) * fill_pct / 100.0).round() as usize;
+    if filled_h > 0 {
+        let fill_y = y + 1 + inner_h - filled_h;
+        fill_rect(
+            buf,
+            width,
+            x + 1,
+            fill_y,
+            bar_w - 2,
+            filled_h,
+            palette_color(percent),
+        );
     }
 }
 
@@ -143,57 +141,30 @@ fn rgba_to_argb(rgba: &[u8]) -> Vec<u8> {
 
 fn tray_icon_pixmap(metrics: &TrayMetrics) -> Vec<ksni::Icon> {
     const SIZE: usize = 48;
+    const BAR_W: usize = 14;
+    const BAR_H: usize = 34;
+    const BAR_Y: usize = 7;
+    const LEFT_X: usize = 7;
+    const RIGHT_X: usize = 27;
     let mut rgba = vec![0u8; SIZE * SIZE * 4];
-    fill_rect(&mut rgba, SIZE, 0, 0, SIZE, SIZE, [245, 245, 240, 255]);
-    fill_rect(
-        &mut rgba,
-        SIZE,
-        2,
-        2,
-        SIZE - 4,
-        SIZE - 4,
-        [250, 250, 246, 255],
-    );
-    fill_rect(&mut rgba, SIZE, 3, 3, SIZE - 6, 12, [74, 144, 217, 255]);
-    fill_rect(&mut rgba, SIZE, 4, 16, SIZE - 8, 13, [232, 232, 226, 255]);
-    fill_rect(&mut rgba, SIZE, 4, 31, SIZE - 8, 13, [232, 232, 226, 255]);
 
-    let Ok(font) = FontRef::try_from_slice(include_bytes!("../fonts/NotoSans-Bold.ttf")) else {
-        return Vec::new();
-    };
-
-    draw_text(
+    draw_bar(
         &mut rgba,
         SIZE,
-        SIZE,
-        &font,
-        "CU",
-        11.0,
-        1.0,
-        9.5,
-        [255, 255, 255, 255],
+        LEFT_X,
+        BAR_Y,
+        BAR_W,
+        BAR_H,
+        parse_percent(&metrics.five_hour),
     );
-    draw_text(
+    draw_bar(
         &mut rgba,
         SIZE,
-        SIZE,
-        &font,
-        &metrics.five_hour,
-        8.0,
-        14.5,
-        9.5,
-        [26, 26, 26, 255],
-    );
-    draw_text(
-        &mut rgba,
-        SIZE,
-        SIZE,
-        &font,
-        &metrics.weekly,
-        8.0,
-        29.5,
-        9.5,
-        [26, 26, 26, 255],
+        RIGHT_X,
+        BAR_Y,
+        BAR_W,
+        BAR_H,
+        parse_percent(&metrics.weekly),
     );
 
     vec![ksni::Icon {
