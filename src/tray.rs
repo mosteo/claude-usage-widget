@@ -180,11 +180,27 @@ fn percent_string(value: Option<f64>) -> String {
         .unwrap_or_else(|| String::from("%?"))
 }
 
-pub fn signal_existing_host(socket_path: &Path) -> bool {
+pub fn replace_existing_host(socket_path: &Path) -> Result<bool, String> {
     let Ok(mut stream) = UnixStream::connect(socket_path) else {
-        return false;
+        return Ok(false);
     };
-    stream.write_all(b"toggle\n").is_ok()
+    stream
+        .write_all(b"quit\n")
+        .map_err(|err| format!("Failed to ask existing tray instance to quit: {err}"))?;
+
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(50));
+        if !socket_path.exists() {
+            return Ok(true);
+        }
+        if UnixStream::connect(socket_path).is_err() {
+            return Ok(true);
+        }
+    }
+
+    // Best-effort handoff: the old instance may still be in the middle of
+    // shutting down, but the new process should continue and take over.
+    Ok(true)
 }
 
 struct PopupManager {

@@ -443,8 +443,8 @@ fn main() {
     if !options.popup {
         install_desktop_entry();
         if let Some(socket_path) = config::tray_socket_path() {
-            if tray::signal_existing_host(&socket_path) {
-                return;
+            if let Err(err) = tray::replace_existing_host(&socket_path) {
+                fatal_error(&err);
             }
         }
 
