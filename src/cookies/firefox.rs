@@ -1,34 +1,47 @@
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "linux"))]
 use crate::cookies::platform::firefox_default_dir;
+#[cfg(target_os = "linux")]
+use crate::cookies::platform::firefox_default_dirs;
 use crate::cookies::{CookieError, CookieJar};
 
 pub fn read(domain: &str, data_dir: Option<&str>) -> Result<CookieJar, CookieError> {
-    let ff_dir = match data_dir {
-        Some(d) => PathBuf::from(d),
-        None => firefox_default_dir().ok_or(CookieError::NoBrowserDir)?,
+    let ff_dirs: Vec<PathBuf> = match data_dir {
+        Some(d) => vec![PathBuf::from(d)],
+        #[cfg(target_os = "linux")]
+        None => firefox_default_dirs(),
+        #[cfg(not(target_os = "linux"))]
+        None => firefox_default_dir().into_iter().collect(),
     };
-    if !ff_dir.is_dir() {
+
+    if ff_dirs.is_empty() {
         return Err(CookieError::NoBrowserDir);
     }
 
     let mut dbs: Vec<PathBuf> = Vec::new();
 
-    // Scan profile subdirectories for cookies.sqlite
-    if let Ok(entries) = fs::read_dir(&ff_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path().join("cookies.sqlite");
-            if path.is_file() {
-                dbs.push(path);
+    for ff_dir in &ff_dirs {
+        if !ff_dir.is_dir() {
+            continue;
+        }
+
+        // Scan profile subdirectories for cookies.sqlite
+        if let Ok(entries) = fs::read_dir(ff_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path().join("cookies.sqlite");
+                if path.is_file() {
+                    dbs.push(path);
+                }
             }
         }
-    }
 
-    // Also check for cookies.sqlite directly in the directory
-    let direct = ff_dir.join("cookies.sqlite");
-    if direct.is_file() {
-        dbs.push(direct);
+        // Also check for cookies.sqlite directly in the directory
+        let direct = ff_dir.join("cookies.sqlite");
+        if direct.is_file() {
+            dbs.push(direct);
+        }
     }
 
     if dbs.is_empty() {

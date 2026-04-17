@@ -12,8 +12,25 @@ pub fn home_dir() -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
+pub fn firefox_default_dirs() -> Vec<PathBuf> {
+    let Some(home) = home_dir() else {
+        return vec![];
+    };
+    [
+        ".mozilla/firefox",
+        "snap/firefox/common/.mozilla/firefox",
+        ".var/app/org.mozilla.firefox/.mozilla/firefox",
+    ]
+    .iter()
+    .map(|p| home.join(p))
+    .filter(|p| p.is_dir())
+    .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 pub fn firefox_default_dir() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".mozilla/firefox"))
+    firefox_default_dirs().into_iter().next()
 }
 
 #[cfg(target_os = "macos")]
@@ -24,6 +41,27 @@ pub fn firefox_default_dir() -> Option<PathBuf> {
 #[cfg(target_os = "windows")]
 pub fn firefox_default_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Mozilla/Firefox/Profiles"))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firefox_linux_default_dirs_include_snap_location() {
+        let Some(home) = home_dir() else {
+            return;
+        };
+
+        let expected = home.join("snap/firefox/common/.mozilla/firefox");
+        let discovered = [
+            home.join(".mozilla/firefox"),
+            expected.clone(),
+            home.join(".var/app/org.mozilla.firefox/.mozilla/firefox"),
+        ];
+
+        assert!(discovered.iter().any(|path| path == &expected));
+    }
 }
 
 // ---------------------------------------------------------------------------

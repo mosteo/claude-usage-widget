@@ -427,6 +427,7 @@ dependencies = [
 name = "claude-usage"
 version = "0.7.0"
 dependencies = [
+ "ab_glyph",
  "aes",
  "aes-gcm",
  "base64",

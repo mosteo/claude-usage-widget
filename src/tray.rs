@@ -12,6 +12,7 @@ use crate::api::UsageResponse;
 use crate::config;
 use crate::cookies::{self, BrowserKind};
 use crate::usage_state::UsageModel;
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 
 const POPUP_WIDTH: i32 = 186;
 const POPUP_HEIGHT: i32 = 274;
@@ -39,6 +40,8 @@ impl TrayOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrayMetrics {
+    five_hour: String,
+    weekly: String,
     title: String,
     tooltip: String,
 }
@@ -46,6 +49,8 @@ struct TrayMetrics {
 impl Default for TrayMetrics {
     fn default() -> Self {
         Self {
+            five_hour: String::from("%?"),
+            weekly: String::from("%?"),
             title: String::from("5h %? | 7d %?"),
             tooltip: String::from("Claude Usage\n5h: %?\n7d: %?"),
         }
@@ -64,10 +69,138 @@ impl TrayMetrics {
         );
 
         Self {
+            five_hour: five_hour.clone(),
+            weekly: weekly.clone(),
             title: format!("5h {five_hour} | 7d {weekly}"),
             tooltip: format!("Claude Usage\n5h: {five_hour}\n7d: {weekly}"),
         }
     }
+}
+
+fn blend_pixel(dest: &mut [u8], src: [u8; 4], coverage: f32) {
+    let alpha = (src[3] as f32 / 255.0) * coverage.clamp(0.0, 1.0);
+    let inv = 1.0 - alpha;
+    dest[0] = (src[0] as f32 * alpha + dest[0] as f32 * inv).round() as u8;
+    dest[1] = (src[1] as f32 * alpha + dest[1] as f32 * inv).round() as u8;
+    dest[2] = (src[2] as f32 * alpha + dest[2] as f32 * inv).round() as u8;
+    dest[3] = ((alpha + (dest[3] as f32 / 255.0) * inv) * 255.0).round() as u8;
+}
+
+fn fill_rect(buf: &mut [u8], width: usize, x: usize, y: usize, w: usize, h: usize, color: [u8; 4]) {
+    for yy in y..(y + h) {
+        for xx in x..(x + w) {
+            let idx = (yy * width + xx) * 4;
+            buf[idx..idx + 4].copy_from_slice(&color);
+        }
+    }
+}
+
+fn draw_text(
+    buf: &mut [u8],
+    width: usize,
+    height: usize,
+    font: &FontRef<'_>,
+    text: &str,
+    x: f32,
+    y: f32,
+    px: f32,
+    color: [u8; 4],
+) {
+    let scaled = font.as_scaled(PxScale::from(px));
+    let mut caret = point(x, y + scaled.ascent());
+    let mut previous = None;
+
+    for ch in text.chars() {
+        let glyph_id = scaled.glyph_id(ch);
+        if let Some(prev) = previous {
+            caret.x += scaled.kern(prev, glyph_id);
+        }
+        let glyph = glyph_id.with_scale_and_position(scaled.scale(), caret);
+        if let Some(outlined) = scaled.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = gx as i32 + bounds.min.x.floor() as i32;
+                let py = gy as i32 + bounds.min.y.floor() as i32;
+                if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+                    return;
+                }
+                let idx = (py as usize * width + px as usize) * 4;
+                blend_pixel(&mut buf[idx..idx + 4], color, coverage);
+            });
+        }
+        caret.x += scaled.h_advance(glyph_id);
+        previous = Some(glyph_id);
+    }
+}
+
+fn rgba_to_argb(rgba: &[u8]) -> Vec<u8> {
+    let mut argb = Vec::with_capacity(rgba.len());
+    for chunk in rgba.chunks_exact(4) {
+        argb.extend_from_slice(&[chunk[3], chunk[0], chunk[1], chunk[2]]);
+    }
+    argb
+}
+
+fn tray_icon_pixmap(metrics: &TrayMetrics) -> Vec<ksni::Icon> {
+    const SIZE: usize = 48;
+    let mut rgba = vec![0u8; SIZE * SIZE * 4];
+    fill_rect(&mut rgba, SIZE, 0, 0, SIZE, SIZE, [245, 245, 240, 255]);
+    fill_rect(
+        &mut rgba,
+        SIZE,
+        2,
+        2,
+        SIZE - 4,
+        SIZE - 4,
+        [250, 250, 246, 255],
+    );
+    fill_rect(&mut rgba, SIZE, 3, 3, SIZE - 6, 12, [74, 144, 217, 255]);
+    fill_rect(&mut rgba, SIZE, 4, 16, SIZE - 8, 13, [232, 232, 226, 255]);
+    fill_rect(&mut rgba, SIZE, 4, 31, SIZE - 8, 13, [232, 232, 226, 255]);
+
+    let Ok(font) = FontRef::try_from_slice(include_bytes!("../fonts/NotoSans-Bold.ttf")) else {
+        return Vec::new();
+    };
+
+    draw_text(
+        &mut rgba,
+        SIZE,
+        SIZE,
+        &font,
+        "CU",
+        11.0,
+        1.0,
+        9.5,
+        [255, 255, 255, 255],
+    );
+    draw_text(
+        &mut rgba,
+        SIZE,
+        SIZE,
+        &font,
+        &metrics.five_hour,
+        8.0,
+        14.5,
+        9.5,
+        [26, 26, 26, 255],
+    );
+    draw_text(
+        &mut rgba,
+        SIZE,
+        SIZE,
+        &font,
+        &metrics.weekly,
+        8.0,
+        29.5,
+        9.5,
+        [26, 26, 26, 255],
+    );
+
+    vec![ksni::Icon {
+        width: SIZE as i32,
+        height: SIZE as i32,
+        data: rgba_to_argb(&rgba),
+    }]
 }
 
 fn percent_string(value: Option<f64>) -> String {
@@ -252,7 +385,11 @@ impl ksni::Tray for ClaudeUsageTray {
     }
 
     fn icon_name(&self) -> String {
-        String::from("claude-usage")
+        String::new()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        tray_icon_pixmap(&self.metrics)
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
