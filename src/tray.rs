@@ -6,13 +6,17 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use crate::api::UsageResponse;
 use crate::config;
-use crate::cookies::BrowserKind;
+use crate::cookies::{self, BrowserKind};
+use crate::usage_state::UsageModel;
 
 const POPUP_WIDTH: i32 = 186;
 const POPUP_HEIGHT: i32 = 274;
 const POPUP_MARGIN: i32 = 12;
+const TRAY_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub struct TrayOptions {
@@ -31,6 +35,45 @@ impl TrayOptions {
             title: options.title_explicit.then_some(options.title.clone()),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrayMetrics {
+    title: String,
+    tooltip: String,
+}
+
+impl Default for TrayMetrics {
+    fn default() -> Self {
+        Self {
+            title: String::from("5h %? | 7d %?"),
+            tooltip: String::from("Claude Usage\n5h: %?\n7d: %?"),
+        }
+    }
+}
+
+impl TrayMetrics {
+    fn from_usage(data: &UsageResponse) -> Self {
+        let five_hour = percent_string(data.get("five_hour").and_then(|bucket| bucket.utilization));
+        let weekly = percent_string(
+            data.get("seven_day")
+                .or_else(|| data.get("seven_day_opus"))
+                .or_else(|| data.get("seven_day_sonnet"))
+                .or_else(|| data.get("seven_day_cowork"))
+                .and_then(|bucket| bucket.utilization),
+        );
+
+        Self {
+            title: format!("5h {five_hour} | 7d {weekly}"),
+            tooltip: format!("Claude Usage\n5h: {five_hour}\n7d: {weekly}"),
+        }
+    }
+}
+
+fn percent_string(value: Option<f64>) -> String {
+    value
+        .map(|pct| format!("{:.0}%", pct.round().clamp(0.0, 100.0)))
+        .unwrap_or_else(|| String::from("%?"))
 }
 
 pub fn signal_existing_host(socket_path: &Path) -> bool {
@@ -168,9 +211,7 @@ fn start_socket_listener(listener: UnixListener, manager: Arc<Mutex<PopupManager
             }
 
             match command.trim() {
-                "toggle" => {
-                    manager.lock().unwrap().toggle(None);
-                }
+                "toggle" => manager.lock().unwrap().toggle(None),
                 "quit" => {
                     manager.lock().unwrap().shutdown();
                     std::process::exit(0);
@@ -183,6 +224,7 @@ fn start_socket_listener(listener: UnixListener, manager: Arc<Mutex<PopupManager
 
 struct ClaudeUsageTray {
     manager: Arc<Mutex<PopupManager>>,
+    metrics: TrayMetrics,
 }
 
 impl ClaudeUsageTray {
@@ -206,11 +248,19 @@ impl ksni::Tray for ClaudeUsageTray {
     }
 
     fn title(&self) -> String {
-        String::from("Claude Usage")
+        self.metrics.title.clone()
     }
 
     fn icon_name(&self) -> String {
         String::from("claude-usage")
+    }
+
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: String::from("Claude Usage"),
+            description: self.metrics.tooltip.clone(),
+            ..Default::default()
+        }
     }
 
     fn activate(&mut self, x: i32, y: i32) {
@@ -219,6 +269,13 @@ impl ksni::Tray for ClaudeUsageTray {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         vec![
+            ksni::menu::StandardItem {
+                label: self.metrics.title.clone(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            ksni::MenuItem::Separator,
             ksni::menu::StandardItem {
                 label: String::from("Show Usage"),
                 activate: Box::new(|tray: &mut Self| tray.show(None)),
@@ -235,17 +292,132 @@ impl ksni::Tray for ClaudeUsageTray {
     }
 }
 
+fn resolve_tray_browser_and_cookies(
+    options: &TrayOptions,
+    config: &config::Config,
+) -> (BrowserKind, Option<cookies::CookieJar>) {
+    let initial_cookies = config.cached_cookies.clone();
+    let cached_browser = config
+        .cached_browser
+        .as_deref()
+        .and_then(|value| match value {
+            "firefox" => Some(BrowserKind::Firefox),
+            "chrome" => Some(BrowserKind::Chrome),
+            "brave" => Some(BrowserKind::Brave),
+            "edge" => Some(BrowserKind::Edge),
+            _ => None,
+        });
+    let has_cached_session = initial_cookies
+        .as_ref()
+        .is_some_and(|cookies| cookies.contains_key("sessionKey"));
+    let has_oauth = crate::oauth::read_access_token(options.oauth_dir.as_deref()).is_some();
+
+    let browser = if let Some(browser) = options.browser {
+        browser
+    } else if has_cached_session {
+        cached_browser.unwrap_or_else(detect_browser_or_fallback)
+    } else if has_oauth {
+        cached_browser
+            .or_else(|| cookies::detect_browser("claude.ai"))
+            .unwrap_or(BrowserKind::Firefox)
+    } else {
+        detect_browser_or_fallback()
+    };
+
+    (browser, initial_cookies)
+}
+
+fn detect_browser_or_fallback() -> BrowserKind {
+    cookies::detect_browser("claude.ai").unwrap_or(BrowserKind::Firefox)
+}
+
+fn start_usage_updater(handle: ksni::Handle<ClaudeUsageTray>, options: TrayOptions) {
+    std::thread::spawn(move || {
+        let config = config::Config::load();
+        let (browser, initial_cookies) = resolve_tray_browser_and_cookies(&options, &config);
+        let mut usage = UsageModel::new(
+            browser,
+            options.data_dir.clone(),
+            options.oauth_dir.clone(),
+            &config,
+            initial_cookies,
+        );
+
+        if let Some(Ok(snapshot)) = usage.cached_data.as_ref() {
+            let metrics = TrayMetrics::from_usage(snapshot);
+            handle.update(|tray| {
+                tray.metrics = metrics;
+            });
+        }
+
+        loop {
+            if usage.should_refresh() {
+                usage.start_fetch(false);
+            }
+
+            usage.poll_result();
+            if let Some(Ok(snapshot)) = usage.cached_data.as_ref() {
+                let metrics = TrayMetrics::from_usage(snapshot);
+                handle.update(|tray| {
+                    tray.metrics = metrics;
+                });
+            }
+
+            std::thread::sleep(TRAY_POLL_INTERVAL);
+        }
+    });
+}
+
 pub fn run_tray_host(options: TrayOptions) -> Result<(), String> {
     let socket_path = config::tray_socket_path()
         .ok_or_else(|| String::from("Could not determine tray socket path"))?;
     let listener = bind_socket(&socket_path)?;
-    let manager = Arc::new(Mutex::new(PopupManager::new(options, socket_path)));
+    let manager = Arc::new(Mutex::new(PopupManager::new(options.clone(), socket_path)));
     start_socket_listener(listener, Arc::clone(&manager));
 
-    let service = ksni::TrayService::new(ClaudeUsageTray { manager });
-    let _handle = service.spawn();
+    let service = ksni::TrayService::new(ClaudeUsageTray {
+        manager,
+        metrics: TrayMetrics::default(),
+    });
+    let handle = service.handle();
+    start_usage_updater(handle, options);
+    service.spawn();
 
     loop {
         std::thread::park();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::api::UsageBucket;
+
+    use super::*;
+
+    #[test]
+    fn tray_metrics_format_primary_quotas() {
+        let mut usage = HashMap::new();
+        usage.insert(
+            String::from("five_hour"),
+            UsageBucket {
+                utilization: Some(41.6),
+                resets_at: None,
+            },
+        );
+        usage.insert(
+            String::from("seven_day"),
+            UsageBucket {
+                utilization: Some(12.4),
+                resets_at: None,
+            },
+        );
+
+        let metrics = TrayMetrics::from_usage(&usage);
+
+        assert_eq!(metrics.title, "5h 42% | 7d 12%");
+        assert!(metrics.tooltip.contains("5h: 42%"));
+        assert!(metrics.tooltip.contains("7d: 12%"));
     }
 }
