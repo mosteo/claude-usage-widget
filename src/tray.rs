@@ -37,10 +37,12 @@ impl TrayOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct TrayMetrics {
     five_hour: String,
+    five_hour_reset: Option<f64>,
     weekly: String,
+    weekly_reset: Option<f64>,
     title: String,
     tooltip: String,
 }
@@ -49,7 +51,9 @@ impl Default for TrayMetrics {
     fn default() -> Self {
         Self {
             five_hour: String::from("%?"),
+            five_hour_reset: None,
             weekly: String::from("%?"),
+            weekly_reset: None,
             title: String::from("5h %? | 7d %?"),
             tooltip: String::from("Claude Usage\n5h: %?\n7d: %?"),
         }
@@ -58,18 +62,27 @@ impl Default for TrayMetrics {
 
 impl TrayMetrics {
     fn from_usage(data: &UsageResponse) -> Self {
-        let five_hour = percent_string(data.get("five_hour").and_then(|bucket| bucket.utilization));
-        let weekly = percent_string(
-            data.get("seven_day")
-                .or_else(|| data.get("seven_day_opus"))
-                .or_else(|| data.get("seven_day_sonnet"))
-                .or_else(|| data.get("seven_day_cowork"))
-                .and_then(|bucket| bucket.utilization),
-        );
+        let five_hour_bucket = data.get("five_hour");
+        let weekly_bucket = data
+            .get("seven_day")
+            .or_else(|| data.get("seven_day_opus"))
+            .or_else(|| data.get("seven_day_sonnet"))
+            .or_else(|| data.get("seven_day_cowork"));
+
+        let five_hour = percent_string(five_hour_bucket.and_then(|bucket| bucket.utilization));
+        let weekly = percent_string(weekly_bucket.and_then(|bucket| bucket.utilization));
 
         Self {
             five_hour: five_hour.clone(),
+            five_hour_reset: reset_fraction(
+                five_hour_bucket.and_then(|bucket| bucket.resets_at.as_deref()),
+                5 * 60 * 60,
+            ),
             weekly: weekly.clone(),
+            weekly_reset: reset_fraction(
+                weekly_bucket.and_then(|bucket| bucket.resets_at.as_deref()),
+                7 * 24 * 60 * 60,
+            ),
             title: format!("5h {five_hour} | 7d {weekly}"),
             tooltip: format!("Claude Usage\n5h: {five_hour}\n7d: {weekly}"),
         }
@@ -100,6 +113,17 @@ fn palette_color(percent: Option<f64>) -> [u8; 4] {
     }
 }
 
+fn reset_bar_color() -> [u8; 4] {
+    [198, 154, 255, 255]
+}
+
+fn reset_fraction(resets_at: Option<&str>, total_secs: i64) -> Option<f64> {
+    let resets_at = resets_at?;
+    let reset_dt = chrono::DateTime::parse_from_rfc3339(resets_at).ok()?;
+    let remaining = (reset_dt.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
+    Some((remaining as f64 / total_secs as f64).clamp(0.0, 1.0))
+}
+
 fn draw_bar(
     buf: &mut [u8],
     width: usize,
@@ -109,7 +133,7 @@ fn draw_bar(
     bar_h: usize,
     percent: Option<f64>,
 ) {
-    let frame = [110, 110, 110, 255];
+    let frame = [190, 190, 190, 255];
     let bg = [255, 255, 255, 0];
     fill_rect(buf, width, x, y, bar_w, bar_h, frame);
     fill_rect(buf, width, x + 1, y + 1, bar_w - 2, bar_h - 2, bg);
@@ -131,6 +155,37 @@ fn draw_bar(
     }
 }
 
+fn draw_reset_bar(
+    buf: &mut [u8],
+    width: usize,
+    x: usize,
+    y: usize,
+    bar_w: usize,
+    bar_h: usize,
+    fraction_remaining: Option<f64>,
+) {
+    let frame = [195, 180, 220, 210];
+    let bg = [255, 255, 255, 0];
+    fill_rect(buf, width, x, y, bar_w, bar_h, frame);
+    fill_rect(buf, width, x + 1, y + 1, bar_w - 2, bar_h - 2, bg);
+
+    let fill = fraction_remaining.unwrap_or(0.0).clamp(0.0, 1.0);
+    let inner_h = bar_h - 2;
+    let filled_h = ((inner_h as f64) * fill).round() as usize;
+    if filled_h > 0 {
+        let fill_y = y + 1 + inner_h - filled_h;
+        fill_rect(
+            buf,
+            width,
+            x + 1,
+            fill_y,
+            bar_w - 2,
+            filled_h,
+            reset_bar_color(),
+        );
+    }
+}
+
 fn rgba_to_argb(rgba: &[u8]) -> Vec<u8> {
     let mut argb = Vec::with_capacity(rgba.len());
     for chunk in rgba.chunks_exact(4) {
@@ -141,11 +196,13 @@ fn rgba_to_argb(rgba: &[u8]) -> Vec<u8> {
 
 fn tray_icon_pixmap(metrics: &TrayMetrics) -> Vec<ksni::Icon> {
     const SIZE: usize = 48;
-    const BAR_W: usize = 14;
+    const MAIN_BAR_W: usize = 12;
+    const RESET_BAR_W: usize = 5;
+    const GROUP_W: usize = MAIN_BAR_W + 1 + RESET_BAR_W;
     const BAR_H: usize = 34;
     const BAR_Y: usize = 7;
     const LEFT_X: usize = 7;
-    const RIGHT_X: usize = 27;
+    const RIGHT_X: usize = 26;
     let mut rgba = vec![0u8; SIZE * SIZE * 4];
 
     draw_bar(
@@ -153,18 +210,36 @@ fn tray_icon_pixmap(metrics: &TrayMetrics) -> Vec<ksni::Icon> {
         SIZE,
         LEFT_X,
         BAR_Y,
-        BAR_W,
+        MAIN_BAR_W,
         BAR_H,
         parse_percent(&metrics.five_hour),
+    );
+    draw_reset_bar(
+        &mut rgba,
+        SIZE,
+        LEFT_X + GROUP_W - RESET_BAR_W,
+        BAR_Y,
+        RESET_BAR_W,
+        BAR_H,
+        metrics.five_hour_reset,
     );
     draw_bar(
         &mut rgba,
         SIZE,
         RIGHT_X,
         BAR_Y,
-        BAR_W,
+        MAIN_BAR_W,
         BAR_H,
         parse_percent(&metrics.weekly),
+    );
+    draw_reset_bar(
+        &mut rgba,
+        SIZE,
+        RIGHT_X + GROUP_W - RESET_BAR_W,
+        BAR_Y,
+        RESET_BAR_W,
+        BAR_H,
+        metrics.weekly_reset,
     );
 
     vec![ksni::Icon {
@@ -527,14 +602,14 @@ mod tests {
             String::from("five_hour"),
             UsageBucket {
                 utilization: Some(41.6),
-                resets_at: None,
+                resets_at: Some((chrono::Utc::now() + chrono::TimeDelta::hours(2)).to_rfc3339()),
             },
         );
         usage.insert(
             String::from("seven_day"),
             UsageBucket {
                 utilization: Some(12.4),
-                resets_at: None,
+                resets_at: Some((chrono::Utc::now() + chrono::TimeDelta::days(3)).to_rfc3339()),
             },
         );
 
@@ -543,5 +618,7 @@ mod tests {
         assert_eq!(metrics.title, "5h 42% | 7d 12%");
         assert!(metrics.tooltip.contains("5h: 42%"));
         assert!(metrics.tooltip.contains("7d: 12%"));
+        assert!(metrics.five_hour_reset.is_some());
+        assert!(metrics.weekly_reset.is_some());
     }
 }
