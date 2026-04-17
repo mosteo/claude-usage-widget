@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cookies::CookieJar;
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct UsageBucket {
     pub utilization: Option<f64>,
     pub resets_at: Option<String>,
@@ -13,8 +13,7 @@ pub struct UsageBucket {
 pub type UsageResponse = HashMap<String, UsageBucket>;
 type RawUsageResponse = HashMap<String, Option<UsageBucket>>;
 
-const USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0";
+const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0";
 
 fn cookie_header(cookies: &CookieJar) -> String {
     cookies
@@ -48,7 +47,10 @@ pub fn fetch_with_cookies(cookies: &CookieJar) -> Result<UsageResponse, String> 
 
     let raw: RawUsageResponse =
         serde_json::from_str(&body).map_err(|e| format!("JSON parse error: {e}"))?;
-    Ok(raw.into_iter().filter_map(|(k, v)| v.map(|b| (k, b))).collect())
+    Ok(raw
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|b| (k, b)))
+        .collect())
 }
 
 /// Fetch usage via the Anthropic OAuth API (used by Claude Code).
@@ -87,7 +89,10 @@ pub fn fetch_with_oauth(token: &str) -> Result<(UsageResponse, Option<String>), 
                 let u = if u > 1.0 { u } else { u * 100.0 };
                 usage.insert(
                     key.clone(),
-                    UsageBucket { utilization: Some(u), resets_at: bucket.resets_at },
+                    UsageBucket {
+                        utilization: Some(u),
+                        resets_at: bucket.resets_at,
+                    },
                 );
             }
         }

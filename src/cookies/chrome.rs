@@ -41,7 +41,11 @@ fn find_cookie_db(data_dir: Option<&str>, default_dirs: fn() -> Vec<PathBuf>) ->
     candidates.pop()
 }
 
-pub fn read(domain: &str, data_dir: Option<&str>, default_dirs: fn() -> Vec<PathBuf>) -> Result<CookieJar, CookieError> {
+pub fn read(
+    domain: &str,
+    data_dir: Option<&str>,
+    default_dirs: fn() -> Vec<PathBuf>,
+) -> Result<CookieJar, CookieError> {
     let db_path = find_cookie_db(data_dir, default_dirs).ok_or(CookieError::NoCookieDb)?;
 
     // Read the encryption key once (only needed on Windows; returns None elsewhere).

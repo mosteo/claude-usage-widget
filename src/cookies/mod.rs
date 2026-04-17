@@ -26,7 +26,9 @@ pub(crate) fn open_db(db_path: &Path) -> Result<rusqlite::Connection, CookieErro
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_URI;
-        let encoded = db_path.display().to_string()
+        let encoded = db_path
+            .display()
+            .to_string()
             .replace('%', "%25")
             .replace(' ', "%20")
             .replace('?', "%3F")
@@ -53,9 +55,9 @@ pub(crate) fn open_db(db_path: &Path) -> Result<rusqlite::Connection, CookieErro
 /// subprocess that held the lock restarts automatically.
 #[cfg(windows)]
 fn release_file_lock(path: &Path) {
-    use windows::core::{HSTRING, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
     use windows::Win32::System::RestartManager::*;
+    use windows::core::{HSTRING, PCWSTR, PWSTR};
 
     unsafe {
         let file_path = HSTRING::from(path.as_os_str());
@@ -67,12 +69,8 @@ fn release_file_lock(path: &Path) {
             return;
         }
 
-        if RmRegisterResources(
-            session,
-            Some(&[PCWSTR(file_path.as_ptr())]),
-            None,
-            None,
-        ) != ERROR_SUCCESS
+        if RmRegisterResources(session, Some(&[PCWSTR(file_path.as_ptr())]), None, None)
+            != ERROR_SUCCESS
         {
             let _ = RmEndSession(session);
             return;
@@ -188,7 +186,10 @@ pub fn detect_browser(domain: &str) -> Option<BrowserKind> {
 
     for &b in browsers {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let is_chromium = matches!(b, BrowserKind::Chrome | BrowserKind::Brave | BrowserKind::Edge);
+        let is_chromium = matches!(
+            b,
+            BrowserKind::Chrome | BrowserKind::Brave | BrowserKind::Edge
+        );
 
         // On macOS, handle special prompts before attempting reads.
         #[cfg(target_os = "macos")]
@@ -208,7 +209,8 @@ pub fn detect_browser(domain: &str) -> Option<BrowserKind> {
             // (macOS ties "Always Allow" to the binary, so same path = safe).
             if !prompted_keychain && is_chromium {
                 prompted_keychain = true;
-                let exe_path = std::env::current_exe().ok()
+                let exe_path = std::env::current_exe()
+                    .ok()
                     .and_then(|p| p.to_str().map(String::from));
                 let config = crate::config::Config::load();
                 let already_prompted = exe_path.is_some()

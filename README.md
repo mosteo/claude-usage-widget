@@ -1,6 +1,6 @@
-# Claude Usage Widget
+# Claude Usage
 
-Claude's usage page is buried in settings and requires you to open your browser every time you want to check how much of your plan you've used. This widget sits on your desktop and shows your current session and weekly usage at a glance — pulled from the same data shown at https://claude.ai/settings/usage — so you always know where you stand before hitting a rate limit.
+Claude's usage page is buried in settings and requires you to open your browser every time you want to check how much of your plan you've used. On Linux, this app lives in your system tray and opens a lightweight popup with your current session and weekly usage at a glance — pulled from the same data shown at https://claude.ai/settings/usage — so you always know where you stand before hitting a rate limit.
 
 Especially useful for heavy Claude Code users who burn through their allocation quickly and want to keep an eye on remaining capacity without breaking their workflow.
 
@@ -10,10 +10,10 @@ Especially useful for heavy Claude Code users who burn through their allocation 
 
 ## Prerequisites
 
-- **Claude Code** users: works automatically — the widget reads your existing OAuth credentials from `~/.claude/.credentials.json` with no extra setup
+- **Claude Code** users: works automatically — the app reads your existing OAuth credentials from `~/.claude/.credentials.json` with no extra setup
 - **Browser-only** users: log into claude.ai in a supported browser (Firefox, Chrome, Brave, Edge, or Safari)
 
-The widget tries Claude Code OAuth credentials first, then falls back to reading browser session cookies. No API key needed.
+The app tries Claude Code OAuth credentials first, then falls back to reading browser session cookies. No API key needed.
 
 ## Platform Notes
 
@@ -62,18 +62,21 @@ sudo apt install libgtk-3-dev libxcb-screensaver0-dev
                                    (firefox, chrome, brave, edge, safari*) (* macOS only)
 --data-dir <PATH>                  Custom browser data directory (requires --browser)
 --oauth-dir <PATH>                 Claude Code credentials directory (default: ~/.claude)
---title <NAME>                     Display name shown in the widget header
+--title <NAME>                     Display name shown in the popup header
 ```
 
 `--data-dir` is useful for non-standard browser installations or custom profiles where the cookie database isn't in the default location.
 
 `--oauth-dir` is useful if you have multiple Claude Code configurations (e.g. `~/.claude-work`).
 
-When `--title` is omitted, the widget fetches your name from the "What should Claude call you?" setting on your account. You can change this at https://claude.ai/settings/general. Passing `--title` skips that extra API call.
+When `--title` is omitted, the popup fetches your name from the "What should Claude call you?" setting on your account. You can change this at https://claude.ai/settings/general. Passing `--title` skips that extra API call.
 
 ## Behavior
 
-The widget polls usage data every 5 minutes by default. It pauses polling automatically when you're idle (no keyboard/mouse activity) to avoid unnecessary requests. Right-click the widget to adjust the refresh interval.
+- On Linux, launching the app starts a tray icon. Left-click it to toggle the usage popup.
+- The popup closes automatically when it loses focus, and you can still use `Esc` or the close button.
+- Usage data is cached after a successful fetch so the popup can open immediately with the last known snapshot, then refresh in the background.
+- The popup polls usage data every 5 minutes by default and pauses polling automatically when you're idle (no keyboard/mouse activity). Right-click the popup to adjust the refresh interval.
 
 ## Disclaimer
 

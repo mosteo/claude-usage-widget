@@ -54,11 +54,7 @@ pub fn chrome_default_dirs() -> Vec<PathBuf> {
         return vec![];
     };
     let p = home.join("Library/Application Support/Google/Chrome");
-    if p.is_dir() {
-        vec![p]
-    } else {
-        vec![]
-    }
+    if p.is_dir() { vec![p] } else { vec![] }
 }
 
 #[cfg(target_os = "windows")]
@@ -66,12 +62,11 @@ pub fn chrome_default_dirs() -> Vec<PathBuf> {
     let Some(local) = std::env::var_os("LOCALAPPDATA") else {
         return vec![];
     };
-    let p = PathBuf::from(local).join("Google").join("Chrome").join("User Data");
-    if p.is_dir() {
-        vec![p]
-    } else {
-        vec![]
-    }
+    let p = PathBuf::from(local)
+        .join("Google")
+        .join("Chrome")
+        .join("User Data");
+    if p.is_dir() { vec![p] } else { vec![] }
 }
 
 // ---------------------------------------------------------------------------
@@ -100,11 +95,7 @@ pub fn brave_default_dirs() -> Vec<PathBuf> {
         return vec![];
     };
     let p = home.join("Library/Application Support/BraveSoftware/Brave-Browser");
-    if p.is_dir() {
-        vec![p]
-    } else {
-        vec![]
-    }
+    if p.is_dir() { vec![p] } else { vec![] }
 }
 
 #[cfg(target_os = "windows")]
@@ -112,12 +103,11 @@ pub fn brave_default_dirs() -> Vec<PathBuf> {
     let Some(local) = std::env::var_os("LOCALAPPDATA") else {
         return vec![];
     };
-    let p = PathBuf::from(local).join("BraveSoftware").join("Brave-Browser").join("User Data");
-    if p.is_dir() {
-        vec![p]
-    } else {
-        vec![]
-    }
+    let p = PathBuf::from(local)
+        .join("BraveSoftware")
+        .join("Brave-Browser")
+        .join("User Data");
+    if p.is_dir() { vec![p] } else { vec![] }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,11 +120,7 @@ pub fn edge_default_dirs() -> Vec<PathBuf> {
         return vec![];
     };
     let p = home.join(".config/microsoft-edge");
-    if p.is_dir() {
-        vec![p]
-    } else {
-        vec![]
-    }
+    if p.is_dir() { vec![p] } else { vec![] }
 }
 
 #[cfg(target_os = "macos")]
@@ -143,11 +129,7 @@ pub fn edge_default_dirs() -> Vec<PathBuf> {
         return vec![];
     };
     let p = home.join("Library/Application Support/Microsoft Edge");
-    if p.is_dir() {
-        vec![p]
-    } else {
-        vec![]
-    }
+    if p.is_dir() { vec![p] } else { vec![] }
 }
 
 #[cfg(target_os = "windows")]
@@ -155,12 +137,11 @@ pub fn edge_default_dirs() -> Vec<PathBuf> {
     let Some(local) = std::env::var_os("LOCALAPPDATA") else {
         return vec![];
     };
-    let p = PathBuf::from(local).join("Microsoft").join("Edge").join("User Data");
-    if p.is_dir() {
-        vec![p]
-    } else {
-        vec![]
-    }
+    let p = PathBuf::from(local)
+        .join("Microsoft")
+        .join("Edge")
+        .join("User Data");
+    if p.is_dir() { vec![p] } else { vec![] }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,9 +172,9 @@ fn dpapi_decrypt(blob: &[u8]) -> Option<Vec<u8>> {
     unsafe {
         CryptUnprotectData(&input, None, None, None, None, 0, &mut output).ok()?;
         let key = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-        let _ = windows::Win32::Foundation::LocalFree(Some(
-            windows::Win32::Foundation::HLOCAL(output.pbData as _),
-        ));
+        let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+            output.pbData as _,
+        )));
         Some(key)
     }
 }
@@ -237,7 +218,9 @@ fn impersonate_system() -> Option<windows::Win32::Foundation::HANDLE> {
         let mut buf = [0u16; 260];
         let len = unsafe { K32GetProcessImageFileNameW(h, &mut buf) } as usize;
         let _ = unsafe { CloseHandle(h) };
-        if len == 0 { continue; }
+        if len == 0 {
+            continue;
+        }
         let name = OsString::from_wide(&buf[..len]);
         let name = name.to_string_lossy();
         if name.ends_with("lsass.exe") {
@@ -360,7 +343,11 @@ fn try_decrypt(ciphertext: &[u8], password: &[u8], iterations: u32) -> Option<St
 
     // Chrome 130+ prepends SHA256(host_key) (32 bytes) to the plaintext before
     // encrypting.  If the first 32 bytes look like binary hash data, strip them.
-    let payload = if decrypted.len() > 32 && decrypted[..32].iter().any(|&b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r') {
+    let payload = if decrypted.len() > 32
+        && decrypted[..32]
+            .iter()
+            .any(|&b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r')
+    {
         &decrypted[32..]
     } else {
         decrypted
@@ -373,20 +360,22 @@ fn try_decrypt(ciphertext: &[u8], password: &[u8], iterations: u32) -> Option<St
 fn get_keyring_password() -> Option<&'static [u8]> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<Option<Vec<u8>>> = OnceLock::new();
-    CACHED.get_or_init(|| {
-        for app in ["chrome", "chromium", "brave"] {
-            let Ok(output) = std::process::Command::new("secret-tool")
-                .args(["lookup", "application", app])
-                .output()
-            else {
-                continue;
-            };
-            if output.status.success() && !output.stdout.is_empty() {
-                return Some(output.stdout.trim_ascii().to_vec());
+    CACHED
+        .get_or_init(|| {
+            for app in ["chrome", "chromium", "brave"] {
+                let Ok(output) = std::process::Command::new("secret-tool")
+                    .args(["lookup", "application", app])
+                    .output()
+                else {
+                    continue;
+                };
+                if output.status.success() && !output.stdout.is_empty() {
+                    return Some(output.stdout.trim_ascii().to_vec());
+                }
             }
-        }
-        None
-    }).as_deref()
+            None
+        })
+        .as_deref()
 }
 
 #[cfg(target_os = "linux")]
@@ -439,9 +428,9 @@ pub fn decrypt_chrome_value(encrypted: &[u8], _key: Option<&[u8]>) -> Result<Str
         ("Chromium Safe Storage", "Chromium"),
         ("Microsoft Edge Safe Storage", "Microsoft Edge"),
     ]
-        .iter()
-        .find_map(|(svc, acct)| get_generic_password(svc, acct).ok())
-        .ok_or_else(|| CookieError::Decrypt("Keychain lookup failed for all browsers".into()))?;
+    .iter()
+    .find_map(|(svc, acct)| get_generic_password(svc, acct).ok())
+    .ok_or_else(|| CookieError::Decrypt("Keychain lookup failed for all browsers".into()))?;
     let mut key = [0u8; 16];
     pbkdf2_hmac::<Sha1>(&password, b"saltysalt", 1003, &mut key);
     let iv = [0x20u8; 16];
@@ -453,7 +442,11 @@ pub fn decrypt_chrome_value(encrypted: &[u8], _key: Option<&[u8]>) -> Result<Str
         .map_err(|e| CookieError::Decrypt(format!("AES decrypt failed: {e}")))?;
 
     // Chrome 130+ prepends SHA256(host_key) (32 bytes) to the plaintext.
-    let payload = if decrypted.len() > 32 && decrypted[..32].iter().any(|&b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r') {
+    let payload = if decrypted.len() > 32
+        && decrypted[..32]
+            .iter()
+            .any(|&b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r')
+    {
         &decrypted[32..]
     } else {
         decrypted
@@ -493,7 +486,11 @@ pub fn decrypt_chrome_value(encrypted: &[u8], key: Option<&[u8]>) -> Result<Stri
         .map_err(|e| CookieError::Decrypt(format!("AES-GCM decrypt failed: {e}")))?;
 
     // Chrome 130+ prepends SHA256(host_key) (32 bytes) to the plaintext.
-    let payload = if plaintext.len() > 32 && plaintext[..32].iter().any(|&b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r') {
+    let payload = if plaintext.len() > 32
+        && plaintext[..32]
+            .iter()
+            .any(|&b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r')
+    {
         &plaintext[32..]
     } else {
         &plaintext
@@ -510,7 +507,9 @@ pub fn decrypt_chrome_value(encrypted: &[u8], key: Option<&[u8]>) -> Result<Stri
 #[cfg(target_os = "windows")]
 pub fn is_elevated() -> bool {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
@@ -553,8 +552,8 @@ pub fn elevate_with_message(msg: &str) -> bool {
         return true;
     }
 
-    use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::{HSTRING, PCWSTR};
 
     let text: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
     let caption: Vec<u16> = "Claude Usage\0".encode_utf16().collect();

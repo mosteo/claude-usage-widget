@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
+## [Unreleased]
+
+### Added
+
+- Linux tray host with a single-instance socket, tray menu, and click-to-toggle usage popup
+- Popup snapshot caching so repeated opens render the last successful usage data immediately before refreshing
+- Internal `--popup`, `--popup-x`, and `--popup-y` modes for tray-spawned popup windows
+
+### Changed
+
+- Linux now launches as a tray app by default instead of showing a permanently visible borderless desktop widget
+- The usage window is now a transient popup that auto-closes on blur while keeping the existing egui usage display
+
 ## [0.7.0] - 2026-03-09
 
 ### Added

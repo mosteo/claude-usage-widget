@@ -5,123 +5,41 @@ mod config;
 mod cookies;
 mod idle;
 mod oauth;
+#[cfg(target_os = "linux")]
+mod tray;
+mod usage_state;
 mod widget;
 
 use cookies::BrowserKind;
 
-// ---------------------------------------------------------------------------
-// Linux: prefer XWayland for native compositor shadows on frameless windows.
-//
-// On Wayland, undecorated xdg_toplevel surfaces get no drop shadow from the
-// compositor (Mutter, KWin, etc.).  Running through XWayland instead gives us
-// an X11 managed window that the compositor *does* shadow — the same reason
-// Tkinter widgets get shadows on Wayland sessions.
-//
-// If DISPLAY is set we can use XWayland; otherwise we fall back to native
-// Wayland (no shadow, but still functional).
-//
-// Once the XWayland window is mapped we also poke EWMH properties to make it
-// sticky, always-on-top, and hidden from the taskbar.
-// ---------------------------------------------------------------------------
-
-/// Returns true if we successfully switched to the X11 backend.
-#[cfg(target_os = "linux")]
-fn prefer_xwayland() -> bool {
-    // Already on X11 — nothing to do, EWMH code will work as-is.
-    if std::env::var("WAYLAND_DISPLAY").is_err() {
-        return std::env::var("DISPLAY").is_ok();
-    }
-
-    // Wayland session, but DISPLAY is set → XWayland is available.
-    if std::env::var("DISPLAY").is_ok() {
-        // Safety: called before any other threads are spawned.
-        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
-        return true;
-    }
-
-    // Pure Wayland, no XWayland — fall back to native Wayland.
-    false
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CliOptions {
+    browser: Option<BrowserKind>,
+    data_dir: Option<String>,
+    oauth_dir: Option<String>,
+    title: String,
+    title_explicit: bool,
+    uninstall: bool,
+    popup: bool,
+    popup_x: Option<i32>,
+    popup_y: Option<i32>,
 }
 
-/// Spawn a background thread that waits for our X11 window to appear, then
-/// sets EWMH states (sticky, always-on-top).
-#[cfg(target_os = "linux")]
-fn set_x11_states(wm_name: String) {
-    std::thread::spawn(move || {
-        for _ in 0..50 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if try_set_x11_states(&wm_name).is_some() {
-                return;
-            }
-        }
-    });
-}
-
-#[cfg(target_os = "linux")]
-fn try_set_x11_states(wm_name: &str) -> Option<()> {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::*;
-
-    let (conn, screen_num) = x11rb::connect(None).ok()?;
-    let root = conn.setup().roots[screen_num].root;
-
-    let intern = |name: &[u8]| -> Option<Atom> {
-        conn.intern_atom(false, name).ok()?.reply().ok().map(|r| r.atom)
-    };
-
-    let net_client_list = intern(b"_NET_CLIENT_LIST")?;
-    let net_wm_name = intern(b"_NET_WM_NAME")?;
-    let utf8_string = intern(b"UTF8_STRING")?;
-    let net_wm_state = intern(b"_NET_WM_STATE")?;
-    let state_sticky = intern(b"_NET_WM_STATE_STICKY")?;
-    let state_above = intern(b"_NET_WM_STATE_ABOVE")?;
-
-    let reply = conn
-        .get_property(false, root, net_client_list, AtomEnum::WINDOW, 0, 4096)
-        .ok()?
-        .reply()
-        .ok()?;
-
-    let mut window = None;
-    for wid in reply.value32()? {
-        let name = conn
-            .get_property(false, wid, net_wm_name, utf8_string, 0, 256)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|r| String::from_utf8_lossy(&r.value).to_string());
-        if name.as_deref() == Some(wm_name) {
-            window = Some(wid);
-            break;
+impl Default for CliOptions {
+    fn default() -> Self {
+        Self {
+            browser: None,
+            data_dir: None,
+            oauth_dir: None,
+            title: String::from("Plan Usage"),
+            title_explicit: false,
+            uninstall: false,
+            popup: false,
+            popup_x: None,
+            popup_y: None,
         }
     }
-    let window = window?;
-
-    for &state in &[state_sticky, state_above] {
-        let event = ClientMessageEvent {
-            response_type: CLIENT_MESSAGE_EVENT,
-            format: 32,
-            sequence: 0,
-            window,
-            type_: net_wm_state,
-            data: ClientMessageData::from([1u32, state, 0, 1, 0]),
-        };
-        conn.send_event(
-            false,
-            root,
-            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-            event,
-        )
-        .ok()?;
-    }
-
-    conn.flush().ok()?;
-    Some(())
 }
-
-// ---------------------------------------------------------------------------
-// Desktop integration: auto-install .desktop file and icon on Linux so GNOME
-// (and other freedesktop-compliant DEs) show the app icon in the dash/taskbar.
-// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
 fn xdg_data_dir() -> std::path::PathBuf {
@@ -152,9 +70,8 @@ fn install_desktop_entry() {
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| "claude-usage".into());
+        .unwrap_or_else(|| String::from("claude-usage"));
 
-    // Skip if already installed and Exec= still points to the current binary.
     if desktop_path.exists() && icon_path.exists() {
         if let Ok(contents) = std::fs::read_to_string(&desktop_path) {
             if contents.contains(&format!("Exec={exe}")) {
@@ -163,17 +80,19 @@ fn install_desktop_entry() {
         }
     }
 
-    let desktop_content = format!("[Desktop Entry]
+    let desktop_content = format!(
+        "[Desktop Entry]
 Type=Application
 Name=Claude Usage
-Comment=Desktop widget showing Claude usage stats
+Comment=Tray app for Claude usage stats
 Exec={exe}
 Icon=claude-usage
 Terminal=false
 StartupWMClass=claude-usage
 StartupNotify=false
 Categories=Utility;
-");
+"
+    );
 
     if let Some(parent) = desktop_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -185,10 +104,17 @@ Categories=Utility;
     }
     let _ = std::fs::write(&icon_path, include_bytes!("../images/icon.png"));
 
-    // Refresh caches so the DE picks up the new icon immediately.
     let _ = std::process::Command::new("gtk-update-icon-cache")
         .args(["-f", "-t"])
-        .arg(icon_path.parent().unwrap().parent().unwrap().parent().unwrap())
+        .arg(
+            icon_path
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap(),
+        )
         .output();
     let _ = std::process::Command::new("update-desktop-database")
         .arg(desktop_path.parent().unwrap())
@@ -206,12 +132,17 @@ fn fatal_error(msg: &str) -> ! {
     eprintln!("{msg}");
     #[cfg(target_os = "windows")]
     {
-        use windows::core::PCWSTR;
         use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::core::PCWSTR;
         let text: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
         let caption: Vec<u16> = "Claude Usage\0".encode_utf16().collect();
         unsafe {
-            MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(caption.as_ptr()), MB_OK | MB_ICONERROR);
+            MessageBoxW(
+                None,
+                PCWSTR(text.as_ptr()),
+                PCWSTR(caption.as_ptr()),
+                MB_OK | MB_ICONERROR,
+            );
         }
     }
     #[cfg(target_os = "macos")]
@@ -226,7 +157,6 @@ fn fatal_error(msg: &str) -> ! {
     }
     #[cfg(target_os = "linux")]
     {
-        // Try zenity (GTK), then kdialog (KDE), then notify-send as fallback.
         let shown = std::process::Command::new("zenity")
             .args(["--error", "--title=Claude Usage", "--text", msg])
             .output()
@@ -253,101 +183,108 @@ fn print_usage() {
     eprintln!("  --data-dir <PATH>           Browser data directory");
     eprintln!("  --oauth-dir <PATH>          Claude Code credentials directory");
     eprintln!("                              (default: ~/.claude)");
-    eprintln!("  --title <NAME>              Widget title (default: Plan Usage)");
+    eprintln!("  --title <NAME>              Popup title (default: Plan Usage)");
     eprintln!("  --uninstall                 Remove desktop entry and icon");
     eprintln!("  --help                      Show this help");
 }
 
-
-fn detect_browser_or_exit() -> BrowserKind {
-    cookies::detect_browser("claude.ai")
-        .unwrap_or_else(|| fatal_error("No claude.ai session found in any supported browser."))
+fn parse_browser(value: &str) -> Result<BrowserKind, String> {
+    match value {
+        "firefox" => Ok(BrowserKind::Firefox),
+        "chrome" => Ok(BrowserKind::Chrome),
+        "brave" => Ok(BrowserKind::Brave),
+        "edge" => Ok(BrowserKind::Edge),
+        #[cfg(target_os = "macos")]
+        "safari" => Ok(BrowserKind::Safari),
+        _ => Err(format!("Error: unknown browser '{value}'")),
+    }
 }
 
-fn main() {
-    #[cfg(target_os = "linux")]
-    let use_x11 = prefer_xwayland();
+fn parse_i32_arg(flag: &str, value: &str) -> Result<i32, String> {
+    value
+        .parse::<i32>()
+        .map_err(|_| format!("Error: {flag} requires an integer value"))
+}
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut browser: Option<BrowserKind> = None;
-    let mut data_dir: Option<String> = None;
-    let mut oauth_dir: Option<String> = None;
-    let mut title = String::from("Plan Usage");
-    let mut title_explicit = false;
+fn parse_args(args: &[String]) -> Result<CliOptions, String> {
+    let mut options = CliOptions::default();
+    let mut i = 0usize;
 
-    let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
             }
-            "--uninstall" => {
-                #[cfg(target_os = "linux")]
-                uninstall_desktop_entry();
-                #[cfg(not(target_os = "linux"))]
-                eprintln!("--uninstall is only supported on Linux");
-                std::process::exit(0);
-            }
+            "--uninstall" => options.uninstall = true,
+            "--popup" => options.popup = true,
             "--browser" => {
                 i += 1;
                 if i >= args.len() {
-                    fatal_error("Error: --browser requires a value");
+                    return Err(String::from("Error: --browser requires a value"));
                 }
-                browser = Some(match args[i].as_str() {
-                    "firefox" => BrowserKind::Firefox,
-                    "chrome" => BrowserKind::Chrome,
-                    "brave" => BrowserKind::Brave,
-                    "edge" => BrowserKind::Edge,
-                    #[cfg(target_os = "macos")]
-                    "safari" => BrowserKind::Safari,
-                    other => {
-                        fatal_error(&format!("Error: unknown browser '{other}'"));
-                    }
-                });
+                options.browser = Some(parse_browser(&args[i])?);
             }
             "--data-dir" => {
                 i += 1;
                 if i >= args.len() {
-                    fatal_error("Error: --data-dir requires a value");
+                    return Err(String::from("Error: --data-dir requires a value"));
                 }
-                data_dir = Some(args[i].clone());
+                options.data_dir = Some(args[i].clone());
             }
             "--oauth-dir" => {
                 i += 1;
                 if i >= args.len() {
-                    fatal_error("Error: --oauth-dir requires a value");
+                    return Err(String::from("Error: --oauth-dir requires a value"));
                 }
-                oauth_dir = Some(args[i].clone());
+                options.oauth_dir = Some(args[i].clone());
             }
             "--title" => {
                 i += 1;
                 if i >= args.len() {
-                    fatal_error("Error: --title requires a value");
+                    return Err(String::from("Error: --title requires a value"));
                 }
-                title = args[i].clone();
-                title_explicit = true;
+                options.title = args[i].clone();
+                options.title_explicit = true;
             }
-            other => {
-                fatal_error(&format!("Error: unknown argument '{other}'"));
+            "--popup-x" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(String::from("Error: --popup-x requires a value"));
+                }
+                options.popup_x = Some(parse_i32_arg("--popup-x", &args[i])?);
             }
+            "--popup-y" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(String::from("Error: --popup-y requires a value"));
+                }
+                options.popup_y = Some(parse_i32_arg("--popup-y", &args[i])?);
+            }
+            other => return Err(format!("Error: unknown argument '{other}'")),
         }
         i += 1;
     }
 
-    if data_dir.is_some() && browser.is_none() {
-        fatal_error("Error: --data-dir requires --browser");
+    if options.data_dir.is_some() && options.browser.is_none() {
+        return Err(String::from("Error: --data-dir requires --browser"));
+    }
+    if (options.popup_x.is_some() || options.popup_y.is_some()) && !options.popup {
+        return Err(String::from("Error: --popup-x/--popup-y require --popup"));
     }
 
-    let config = config::Config::load();
+    Ok(options)
+}
 
-    // Auto-install .desktop file and icon on Linux (idempotent).
-    #[cfg(target_os = "linux")]
-    install_desktop_entry();
+fn detect_browser_or_exit() -> BrowserKind {
+    cookies::detect_browser("claude.ai")
+        .unwrap_or_else(|| fatal_error("No claude.ai session found in any supported browser."))
+}
 
-    // Try cached cookies from a previous run — avoids reading browser DB,
-    // decryption, Restart Manager, keychain prompts, etc.  The first API
-    // call will validate them; if they're stale the fetch thread re-reads.
+fn resolve_browser_and_cookies(
+    options: &CliOptions,
+    config: &config::Config,
+) -> (BrowserKind, Option<cookies::CookieJar>) {
     let mut initial_cookies = config.cached_cookies.clone();
     let cached_browser = config.cached_browser.as_deref().and_then(|s| match s {
         "firefox" => Some(BrowserKind::Firefox),
@@ -359,35 +296,40 @@ fn main() {
         _ => None,
     });
 
-    let has_cached_session = initial_cookies.as_ref().is_some_and(|c| c.contains_key("sessionKey"));
-    let has_oauth = oauth::read_access_token(oauth_dir.as_deref()).is_some();
+    let has_cached_session = initial_cookies
+        .as_ref()
+        .is_some_and(|cookies| cookies.contains_key("sessionKey"));
+    let has_oauth = oauth::read_access_token(options.oauth_dir.as_deref()).is_some();
 
-    let browser = if let Some(b) = browser {
-        // Explicit --browser: skip DB read if we have cached cookies (the
-        // fetch thread will validate them and re-read from this browser on failure).
+    let browser = if let Some(browser) = options.browser {
         if !has_cached_session {
             #[cfg(target_os = "windows")]
-            if matches!(b, BrowserKind::Chrome | BrowserKind::Brave | BrowserKind::Edge) {
+            if matches!(
+                browser,
+                BrowserKind::Chrome | BrowserKind::Brave | BrowserKind::Edge
+            ) {
                 if !cookies::platform::elevate_if_needed() {
                     std::process::exit(0);
                 }
             }
 
-            match cookies::read_cookies(b, "claude.ai", data_dir.as_deref()) {
-                Ok(c) if c.contains_key("sessionKey") => {
-                    initial_cookies = Some(c);
+            match cookies::read_cookies(browser, "claude.ai", options.data_dir.as_deref()) {
+                Ok(cookies) if cookies.contains_key("sessionKey") => {
+                    initial_cookies = Some(cookies);
                 }
-                Ok(_) if !has_oauth => fatal_error(&format!("No claude.ai session found in {b}.")),
-                Err(e) if !has_oauth => fatal_error(&format!("Error reading {b} cookies: {e}")),
-                _ => {} // OAuth available as fallback
+                Ok(_) if !has_oauth => {
+                    fatal_error(&format!("No claude.ai session found in {browser}."))
+                }
+                Err(err) if !has_oauth => {
+                    fatal_error(&format!("Error reading {browser} cookies: {err}"))
+                }
+                _ => {}
             }
         }
-        b
+        browser
     } else if has_cached_session {
-        // Cached cookies available — use the browser they came from for fallback.
-        cached_browser.unwrap_or_else(|| detect_browser_or_exit())
+        cached_browser.unwrap_or_else(detect_browser_or_exit)
     } else if has_oauth {
-        // OAuth credentials available — browser is only needed as a fallback.
         cached_browser
             .or_else(|| cookies::detect_browser("claude.ai"))
             .unwrap_or(BrowserKind::Firefox)
@@ -395,81 +337,157 @@ fn main() {
         detect_browser_or_exit()
     };
 
-    // Detach from the terminal so the shell prompt returns immediately.
-    // Only on Linux — macOS ObjC runtime crashes if you fork() after init.
-    #[cfg(target_os = "linux")]
-    {
-        unsafe extern "C" {
-            fn fork() -> i32;
-            fn setsid() -> i32;
-        }
-        unsafe {
-            let pid = fork();
-            if pid > 0 {
-                std::process::exit(0); // parent exits
-            }
-            if pid == 0 {
-                setsid(); // child starts a new session
-            }
-            // pid < 0: fork failed, just continue in foreground
-        }
+    (browser, initial_cookies)
+}
+
+#[cfg(target_os = "linux")]
+fn detach_on_linux() {
+    unsafe extern "C" {
+        fn fork() -> i32;
+        fn setsid() -> i32;
     }
 
-    // Give each instance a unique X11 window name so the EWMH thread can
-    // find exactly its own window when multiple instances are running.
-    let wm_name = format!("Claude Usage {}", std::process::id());
+    unsafe {
+        let pid = fork();
+        if pid > 0 {
+            std::process::exit(0);
+        }
+        if pid == 0 {
+            setsid();
+        }
+    }
+}
 
-    let app = widget::UsageApp::new(browser, data_dir, oauth_dir, title, title_explicit, wm_name.clone(), config, initial_cookies);
-
-    use eframe::egui;
-
+fn build_popup_viewport(options: &CliOptions) -> eframe::egui::ViewportBuilder {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../images/icon.png"))
         .expect("Failed to load icon");
 
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_decorations(false)
         .with_inner_size([186.0, 274.0])
         .with_always_on_top()
+        .with_resizable(false)
         .with_icon(icon);
+
+    if let (Some(x), Some(y)) = (options.popup_x, options.popup_y) {
+        viewport = viewport.with_position([x as f32, y as f32]);
+    }
+
+    viewport
+}
+
+fn run_popup(options: CliOptions) {
+    let config = config::Config::load();
+    let (browser, initial_cookies) = resolve_browser_and_cookies(&options, &config);
+    let viewport = build_popup_viewport(&options);
+
+    use eframe::egui;
+
+    let app = widget::UsageApp::new(
+        browser,
+        options.data_dir,
+        options.oauth_dir,
+        options.title,
+        options.title_explicit,
+        config,
+        initial_cookies,
+    );
 
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
 
-    // On Linux with X11, set EWMH states once the window appears.
-    #[cfg(target_os = "linux")]
-    if use_x11 {
-        set_x11_states(wm_name.clone());
-    }
-
     eframe::run_native(
-        &wm_name,
+        "Claude Usage Popup",
         options,
         Box::new(|cc| {
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(
-                "noto_sans".to_owned(),
+                String::from("noto_sans"),
                 egui::FontData::from_static(include_bytes!("../fonts/NotoSans-Regular.ttf")),
             );
             fonts.font_data.insert(
-                "noto_sans_bold".to_owned(),
+                String::from("noto_sans_bold"),
                 egui::FontData::from_static(include_bytes!("../fonts/NotoSans-Bold.ttf")),
             );
             fonts
                 .families
                 .get_mut(&egui::FontFamily::Proportional)
                 .unwrap()
-                .insert(0, "noto_sans".to_owned());
-            fonts
-                .families
-                .insert(
-                    egui::FontFamily::Name("bold".into()),
-                    vec!["noto_sans_bold".to_owned()],
-                );
+                .insert(0, String::from("noto_sans"));
+            fonts.families.insert(
+                egui::FontFamily::Name("bold".into()),
+                vec![String::from("noto_sans_bold")],
+            );
             cc.egui_ctx.set_fonts(fonts);
             Ok(Box::new(app))
         }),
     )
     .expect("Failed to start eframe");
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let options = parse_args(&args).unwrap_or_else(|err| fatal_error(&err));
+
+    if options.uninstall {
+        #[cfg(target_os = "linux")]
+        uninstall_desktop_entry();
+        #[cfg(not(target_os = "linux"))]
+        eprintln!("--uninstall is only supported on Linux");
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    if !options.popup {
+        install_desktop_entry();
+        if let Some(socket_path) = config::tray_socket_path() {
+            if tray::signal_existing_host(&socket_path) {
+                return;
+            }
+        }
+
+        detach_on_linux();
+        if let Err(err) = tray::run_tray_host(tray::TrayOptions::from_cli(&options)) {
+            fatal_error(&err);
+        }
+        return;
+    }
+
+    run_popup(options);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_popup_args() {
+        let args = vec![
+            String::from("--popup"),
+            String::from("--popup-x"),
+            String::from("120"),
+            String::from("--popup-y"),
+            String::from("80"),
+            String::from("--browser"),
+            String::from("firefox"),
+        ];
+
+        let options = parse_args(&args).unwrap();
+
+        assert!(options.popup);
+        assert_eq!(options.popup_x, Some(120));
+        assert_eq!(options.popup_y, Some(80));
+        assert_eq!(options.browser, Some(BrowserKind::Firefox));
+    }
+
+    #[test]
+    fn rejects_popup_position_without_popup_mode() {
+        let args = vec![String::from("--popup-x"), String::from("120")];
+
+        let err = parse_args(&args).unwrap_err();
+
+        assert!(err.contains("--popup-x/--popup-y require --popup"));
+    }
 }

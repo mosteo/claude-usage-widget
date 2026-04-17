@@ -15,19 +15,12 @@ pub fn system_idle_secs() -> Option<u64> {
 #[cfg(target_os = "macos")]
 pub fn system_idle_secs() -> Option<u64> {
     unsafe extern "C" {
-        fn CGEventSourceSecondsSinceLastEventType(
-            source_state_id: i32,
-            event_type: u32,
-        ) -> f64;
+        fn CGEventSourceSecondsSinceLastEventType(source_state_id: i32, event_type: u32) -> f64;
     }
     // kCGEventSourceStateCombinedSessionState = 0
     // kCGAnyInputEventType = ~0u
     let secs = unsafe { CGEventSourceSecondsSinceLastEventType(0, u32::MAX) };
-    if secs >= 0.0 {
-        Some(secs as u64)
-    } else {
-        None
-    }
+    if secs >= 0.0 { Some(secs as u64) } else { None }
 }
 
 #[cfg(target_os = "windows")]
