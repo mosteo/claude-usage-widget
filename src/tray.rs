@@ -71,6 +71,10 @@ impl TrayMetrics {
 
         let five_hour = percent_string(five_hour_bucket.and_then(|bucket| bucket.utilization));
         let weekly = percent_string(weekly_bucket.and_then(|bucket| bucket.utilization));
+        let five_hour_reset_text =
+            time_left(five_hour_bucket.and_then(|bucket| bucket.resets_at.as_deref()));
+        let weekly_reset_text =
+            time_left(weekly_bucket.and_then(|bucket| bucket.resets_at.as_deref()));
 
         Self {
             five_hour: five_hour.clone(),
@@ -84,7 +88,13 @@ impl TrayMetrics {
                 7 * 24 * 60 * 60,
             ),
             title: format!("5h {five_hour} | 7d {weekly}"),
-            tooltip: format!("Claude Usage\n5h: {five_hour}\n7d: {weekly}"),
+            tooltip: format!(
+                "Claude Usage\n5h: {}{}\n7d: {}{}",
+                five_hour,
+                tooltip_reset_suffix(&five_hour_reset_text),
+                weekly,
+                tooltip_reset_suffix(&weekly_reset_text),
+            ),
         }
     }
 }
@@ -122,6 +132,37 @@ fn reset_fraction(resets_at: Option<&str>, total_secs: i64) -> Option<f64> {
     let reset_dt = chrono::DateTime::parse_from_rfc3339(resets_at).ok()?;
     let remaining = (reset_dt.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
     Some((remaining as f64 / total_secs as f64).clamp(0.0, 1.0))
+}
+
+fn time_left(resets_at: Option<&str>) -> String {
+    let Some(s) = resets_at else {
+        return String::new();
+    };
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) else {
+        return String::new();
+    };
+    let now = chrono::Utc::now();
+    let secs = (dt.with_timezone(&chrono::Utc) - now).num_seconds();
+    if secs <= 0 {
+        return String::from("Resetting...");
+    }
+    let m = (secs / 60) % 60;
+    let h = secs / 3600;
+    if h >= 24 {
+        format!("Resets in {}d {}h", h / 24, h % 24)
+    } else if h > 0 {
+        format!("Resets in {h} hr {m} min")
+    } else {
+        format!("Resets in {m} min")
+    }
+}
+
+fn tooltip_reset_suffix(reset_text: &str) -> String {
+    if reset_text.is_empty() {
+        String::new()
+    } else {
+        format!(" ({reset_text})")
+    }
 }
 
 fn draw_bar(
@@ -618,6 +659,7 @@ mod tests {
         assert_eq!(metrics.title, "5h 42% | 7d 12%");
         assert!(metrics.tooltip.contains("5h: 42%"));
         assert!(metrics.tooltip.contains("7d: 12%"));
+        assert!(metrics.tooltip.contains("Resets in"));
         assert!(metrics.five_hour_reset.is_some());
         assert!(metrics.weekly_reset.is_some());
     }
